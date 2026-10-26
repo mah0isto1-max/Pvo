@@ -1,21 +1,33 @@
--- Скрипт проверки периферии блока слева от компьютера (или с любой стороны)
-local side = "left"
+-- Сканирование всех подключенных устройств (со всех сторон и по сети проводных модемов)
+term.clear()
+term.setCursorPos(1, 1)
+print("=== СКАНИРОВАНИЕ ВСЕХ ПОДКЛЮЧЕННЫХ УСТРОЙСТВ ===")
 
-if not peripheral.isPresent(side) then
-    print("Слева от компьютера НЕТ периферийного блока!")
+local names = peripheral.getNames()
+if #names == 0 then
+    print("Не найдено ни одного подключенного устройства.")
+    print("Поставьте блок вплотную к компьютеру или")
+    print("подключите через Wired Modem (кликните ПКМ по модему).")
     return
 end
 
-local pType = peripheral.getType(side)
-print("---------------------------------")
-print("Тип периферии слева: " .. tostring(pType))
-print("Доступные методы:")
-print("---------------------------------")
-
-local methods = peripheral.getMethods(side)
-table.sort(methods)
-
-for i, method in ipairs(methods) do
-    print(string.format("%2d. %s()", i, method))
+for i, name in ipairs(names) do
+    local pType = peripheral.getType(name)
+    local p = peripheral.wrap(name)
+    local methods = peripheral.getMethods(name)
+    
+    print(string.format("[%d] Имя: %s | Тип: %s", i, name, tostring(pType)))
+    
+    -- Проверка ключевых возможностей
+    local features = {}
+    if p.getTracks then table.insert(features, "РАДАР (getTracks)") end
+    if p.setAngle then table.insert(features, "НАВЕДЕНИЕ (setAngle)") end
+    if p.fireOn or p.keepFiring then table.insert(features, "СПУСК (fireOn)") end
+    if p.getSpeed then table.insert(features, "КИНЕТИКА (getSpeed)") end
+    
+    if #features > 0 then
+        print("    -> Возможности: " .. table.concat(features, ", "))
+    end
 end
-print("---------------------------------")
+
+print("================================================")
