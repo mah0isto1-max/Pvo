@@ -1,16 +1,35 @@
--- ==========================================================
--- Heavy Anti-Air AA System (Create Big Cannons + Radar)
--- Auto lead calculation & proximity detonation support
--- ==========================================================
+-- ===================================================================
+-- Minecraft Create: Big Cannons + Create Radar + CC: Tweaked
+-- Heavy Anti-Air (PVO) Fire Control System
+-- MANUAL AUTHORIZATION & STRICT TARGET FILTERING
+-- ===================================================================
 
 local CONFIG = {
-    muzzleVelocity = 60.0,    -- Projectile speed (blocks/sec)
-    gravity = 1.0,            -- Ballistic gravity drop compensation
-    minRange = 20.0,          -- Min range deadzone (blocks)
-    maxRange = 500.0,         -- Max detection & engagement range (blocks)
+    muzzleVelocity = 60.0,    -- Initial shell velocity (blocks/sec)
+    gravity = 1.0,            -- Gravity drop compensation
+    minRange = 20.0,          -- Minimum engagement range (blocks)
+    maxRange = 500.0,         -- Maximum radar engagement range (blocks)
     aimTolerance = 1.8,       -- Aim tolerance in degrees before firing
-    fireDelay = 0.5,          -- Delay between shots (seconds)
+    fireDelay = 0.5,          -- Minimum time between shots (sec)
     iterations = 5,           -- Lead calculation iterations
+    
+    -- Filter out trash entities (mobs, animals, items, glue)
+    ignoredTypes = {
+        ["bat"] = true, ["cow"] = true, ["pig"] = true, ["sheep"] = true,
+        ["chicken"] = true, ["zombie"] = true, ["skeleton"] = true,
+        ["spider"] = true, ["item"] = true, ["experience_orb"] = true,
+        ["super_glue"] = true, ["honey_glue"] = true, ["corpse"] = true
+    }
+}
+
+-- Safety State: FIRE IS FORBIDDEN BY DEFAULT
+local STATE = {
+    lockedId = nil,           -- Currently locked target ID (nil = idle/standby)
+    firePermitted = false,    -- Safety toggle: user MUST permit fire
+    singleShotQueued = false, -- User pressed [F] or [SPACE] for 1 shot
+    isAimed = false,          -- Gun is on calculated lead point
+    target = nil,             -- Target data table
+    lastFireTime = 0
 }
 
 local function autoDetectPeripherals()
@@ -19,32 +38,23 @@ local function autoDetectPeripherals()
     local yawCtrl, yawName = nil, nil
     local fireCtrl, fireName = nil, nil
 
-    local allNames = peripheral.getNames()
-
-    for _, name in ipairs(allNames) do
+    for _, name in ipairs(peripheral.getNames()) do
         local p = peripheral.wrap(name)
         local pType = tostring(peripheral.getType(name) or ""):lower()
         local nLower = name:lower()
 
-        -- 1. Radar (any device with getTracks)
         if not radar and p and p.getTracks then
             radar = p
             radarName = name .. " (" .. pType .. ")"
         end
-
-        -- 2. Pitch controller (elevation)
         if not pitchCtrl and p and p.setAngle and (pType:find("pitch") or nLower:find("pitch")) then
             pitchCtrl = p
             pitchName = name
         end
-
-        -- 3. Yaw controller (azimuth rotation)
         if not yawCtrl and p and p.setAngle and (pType:find("yaw") or nLower:find("yaw")) then
             yawCtrl = p
             yawName = name
         end
-
-        -- 4. Fire controller (trigger)
         if not fireCtrl and p and (p.fireOn or p.keepFiring or pType:find("fire") or nLower:find("fire")) then
             fireCtrl = p
             fireName = name
@@ -56,24 +66,8 @@ end
 
 local radar, radarName, pitchCtrl, pitchName, yawCtrl, yawName, fireCtrl, fireName = autoDetectPeripherals()
 
-term.clear()
-term.setCursorPos(1, 1)
-print("=== PVO AA AIR DEFENSE CONTROL ===")
-print("Radar: " .. tostring(radarName or "[NOT FOUND]"))
-print("Pitch: " .. tostring(pitchName or "[NOT FOUND]"))
-print("Yaw:   " .. tostring(yawName or "[NOT FOUND]"))
-print("Fire:  " .. tostring(fireName or "[NOT FOUND]"))
-print("==================================")
-
 if not radar then
-    print("[ERROR] Radar not detected!")
-    print("Place radar adjacent or connect via Wired Modem.")
-    return
-end
-
-if not (pitchCtrl and yawCtrl) then
-    print("[WARN] Pitch/Yaw controller not found.")
-    print("Mount Auto Pitch and Auto Yaw controllers.")
+    print("[ERROR] Radar not found on any side or wired network!")
     return
 end
 
@@ -89,6 +83,15 @@ local function normalizeAngle(deg)
     while deg > 180 do deg = deg - 360 end
     while deg < -180 do deg = deg + 360 end
     return deg
+end
+
+local function isTargetValid(track)
+    if not track or not track.position then return false end
+    local eType = tostring(track.entityType or track.name or ""):lower()
+    for ignored, _ in pairs(CONFIG.ignoredTypes) do
+        if eType:find(ignored) then return false end
+    end
+    return true
 end
 
 local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
@@ -118,69 +121,154 @@ local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     local targetYaw = math.deg(math.atan2(-toTarget.x, toTarget.z))
     local targetPitch = math.deg(math.atan2(toTarget.y, horizontalDist))
 
-    return targetYaw, targetPitch, timeOfFlight, aimTarget
+    return targetYaw, targetPitch, timeOfFlight, horizontalDist
 end
 
-local function mainLoop()
-    local lastFireTime = 0
-    print("[STATUS] Air Defense active. Scanning sky...")
+-- Render HUD Interface
+local function drawHUD()
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("================ PVO AIR DEFENSE ================")
+    print("Radar: " .. tostring(radarName or "N/A"))
+    print("Guns:  Pitch=" .. tostring(pitchName and "OK" or "NO") ..
+          " | Yaw=" .. tostring(yawName and "OK" or "NO") ..
+          " | Fire=" .. tostring(fireName and "OK" or "NO"))
+    print("-------------------------------------------------")
+    
+    local safetyText = STATE.firePermitted and "[!] FIRE PERMITTED [!]" or "[SAFE] FIRE BLOCKED"
+    print("SAFETY STATUS: " .. safetyText)
+    print("LOCKED TARGET: " .. tostring(STATE.lockedId or "[NONE - STANDBY]"))
+    
+    if STATE.target then
+        local t = STATE.target
+        print(string.format("Dist: %.0fm | Speed: %.1fb/s | ToF: %.2fs", t.dist, t.speed, t.tof))
+        print(string.format("Aim Angles -> Yaw: %.1f | Pitch: %.1f", t.yaw, t.pitch))
+        local aimStatus = STATE.isAimed and ">> ON TARGET (READY) <<" or ".. AIMING .."
+        print("Status: " .. aimStatus)
+    else
+        print("Standby. Select a valid aircraft or contraption.")
+    end
+    print("-------------------------------------------------")
+    print("CONTROLS:")
+    print(" [N] - Next Target    | [U] - Unlock (Standby)")
+    print(" [P] - Permit Toggle  | [F / Space] - FIRE 1 SHOT")
+    print(" [Q] - Quit Program")
+    print("=================================================")
+end
 
+-- Key handling loop
+local function inputLoop()
+    while true do
+        local event, key = os.pullEvent("key")
+        if key == keys.q then
+            print("\nPVO System stopped by operator.")
+            return
+        elseif key == keys.p then
+            STATE.firePermitted = not STATE.firePermitted
+        elseif key == keys.u then
+            STATE.lockedId = nil
+            STATE.target = nil
+            if pitchCtrl and pitchCtrl.stopAuto then pitchCtrl.stopAuto() end
+            if yawCtrl and yawCtrl.stopAuto then yawCtrl.stopAuto() end
+        elseif key == keys.n then
+            -- Cycle to next valid target
+            local tracks = radar.getTracks() or {}
+            local candidates = {}
+            for _, tr in ipairs(tracks) do
+                if isTargetValid(tr) then
+                    table.insert(candidates, tr)
+                end
+            end
+            if #candidates > 0 then
+                local nextIdx = 1
+                for i, c in ipairs(candidates) do
+                    if c.id == STATE.lockedId then
+                        nextIdx = (i % #candidates) + 1
+                        break
+                    end
+                end
+                STATE.lockedId = candidates[nextIdx].id
+            else
+                STATE.lockedId = nil
+            end
+        elseif key == keys.f or key == keys.space then
+            if STATE.firePermitted then
+                STATE.singleShotQueued = true
+            else
+                print("\n[BLOCKED] Fire not permitted! Press [P] to arm safety.")
+                sleep(0.5)
+            end
+        end
+    end
+end
+
+-- Tracking & Fire Loop
+local function trackingLoop()
     while true do
         local myPos = (radar.getPosition and radar.getPosition()) or {x = 0, y = 0, z = 0}
         local tracks = radar.getTracks() or {}
-        local bestTarget = nil
-        local closestDist = CONFIG.maxRange + 1
+        local found = nil
 
-        for _, track in ipairs(tracks) do
-            local pos = track.position
-            local vel = track.velocity or {x = 0, y = 0, z = 0}
-            local dist = vecLength(vecSub(pos, myPos))
-
-            if dist >= CONFIG.minRange and dist <= CONFIG.maxRange then
-                if dist < closestDist then
-                    closestDist = dist
-                    bestTarget = {
-                        id = track.id,
-                        pos = pos,
-                        vel = vel
-                    }
+        if STATE.lockedId then
+            for _, tr in ipairs(tracks) do
+                if tr.id == STATE.lockedId and isTargetValid(tr) then
+                    found = tr
+                    break
                 end
             end
         end
 
-        if bestTarget then
-            local yaw, pitch, tof, aimTarget = calculateLead(
-                myPos,
-                bestTarget.pos,
-                bestTarget.vel,
-                CONFIG.muzzleVelocity,
-                CONFIG.gravity
-            )
+        if found then
+            local pos = found.position
+            local vel = found.velocity or {x = 0, y = 0, z = 0}
+            local vSpeed = vecLength(vel)
+            local yaw, pitch, tof, dist = calculateLead(myPos, pos, vel, CONFIG.muzzleVelocity, CONFIG.gravity)
 
-            yawCtrl.setAngle(yaw)
-            pitchCtrl.setAngle(pitch)
+            STATE.target = {
+                id = found.id,
+                dist = dist,
+                speed = vSpeed,
+                tof = tof,
+                yaw = yaw,
+                pitch = pitch
+            }
 
-            local currentYaw = (yawCtrl.getAngle and yawCtrl.getAngle()) or yaw
-            local currentPitch = (pitchCtrl.getAngle and pitchCtrl.getAngle()) or pitch
+            if yawCtrl and yawCtrl.setAngle then yawCtrl.setAngle(yaw) end
+            if pitchCtrl and pitchCtrl.setAngle then pitchCtrl.setAngle(pitch) end
 
-            local yawDiff = math.abs(normalizeAngle(currentYaw - yaw))
-            local pitchDiff = math.abs(currentPitch - pitch)
+            local curYaw = (yawCtrl and yawCtrl.getAngle and yawCtrl.getAngle()) or yaw
+            local curPitch = (pitchCtrl and pitchCtrl.getAngle and pitchCtrl.getAngle()) or pitch
 
-            local isAimed = (yawDiff <= CONFIG.aimTolerance) and (pitchDiff <= CONFIG.aimTolerance)
+            local yawDiff = math.abs(normalizeAngle(curYaw - yaw))
+            local pitchDiff = math.abs(curPitch - pitch)
+
+            STATE.isAimed = (yawDiff <= CONFIG.aimTolerance) and (pitchDiff <= CONFIG.aimTolerance)
+
             local now = os.epoch("utc") / 1000
-
-            if isAimed and fireCtrl and (now - lastFireTime >= CONFIG.fireDelay) then
-                print(string.format("[FIRE] Target: %s | Dist: %.0fm | Y: %.1f | P: %.1f",
-                    tostring(bestTarget.id), closestDist, yaw, pitch))
-                fireCtrl.fireOn()
-                sleep(0.1)
-                fireCtrl.fireOff()
-                lastFireTime = now
+            -- Execute shot ONLY IF OPERATOR QUEUED IT AND SAFETY IS ARMED
+            if STATE.singleShotQueued and STATE.firePermitted and (now - STATE.lastFireTime >= CONFIG.fireDelay) then
+                if fireCtrl and fireCtrl.fireOn then
+                    fireCtrl.fireOn()
+                    sleep(0.1)
+                    fireCtrl.fireOff()
+                else
+                    -- Fallback: pulse redstone on back/bottom
+                    redstone.setOutput("back", true)
+                    sleep(0.1)
+                    redstone.setOutput("back", false)
+                end
+                STATE.lastFireTime = now
+                STATE.singleShotQueued = false
             end
+        else
+            STATE.target = nil
+            STATE.isAimed = false
+            STATE.singleShotQueued = false
         end
 
-        sleep(0.05)
+        drawHUD()
+        sleep(0.1)
     end
 end
 
-mainLoop()
+parallel.waitForAny(trackingLoop, inputLoop)
