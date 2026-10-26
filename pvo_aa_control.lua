@@ -1,37 +1,41 @@
 -- ===================================================================
--- Minecraft Create: Big Cannons + Create Radar + CC: Tweaked
 -- Heavy Anti-Air (PVO) Fire Control System
--- REFINED CBC BALLISTICS (GRAVITY DROP & SPEED COMPENSATION)
+-- 100% LOCAL & AUTONOMOUS (NO WEBSITE / NO EXTERNAL SERVER)
+-- TARGETS: ONLY PHYSICAL CONTRAPTIONS & SABLE/VS SHIPS
 -- ===================================================================
 
 local CONFIG = {
-    muzzleVelocity = 70.0,    -- CBC projectile speed (blocks/sec), ~3.5 blocks/tick for 3-4 charges
+    muzzleVelocity = 70.0,    -- CBC projectile speed (blocks/sec)
     gravity = 1.25,           -- CBC ballistic gravity drop compensation
-    minRange = 20.0,          -- Minimum engagement range (blocks)
-    maxRange = 500.0,         -- Maximum radar engagement range (blocks)
-    aimTolerance = 1.8,       -- Aim tolerance in degrees before firing
-    fireDelay = 0.5,          -- Minimum time between shots (sec)
-    iterations = 6,           -- Lead calculation iterations
-    
-    ignoredTypes = {
-        ["bat"] = true, ["cow"] = true, ["pig"] = true, ["sheep"] = true,
-        ["chicken"] = true, ["zombie"] = true, ["skeleton"] = true,
-        ["spider"] = true, ["item"] = true, ["experience_orb"] = true,
-        ["super_glue"] = true, ["honey_glue"] = true, ["corpse"] = true
+    minRange = 15.0,          -- Minimum engagement range (blocks)
+    maxRange = 600.0,         -- Maximum radar engagement range (blocks)
+    aimTolerance = 1.6,       -- Aim tolerance in degrees before firing
+    fireDelay = 0.5,          -- Minimum delay between shots (sec)
+    iterations = 6,           -- Iterative lead calculation passes
+
+    -- STRICT FILTER: TARGET ONLY PHYSICAL CONTRAPTIONS AND SABLE SHIPS
+    allowedCategories = {
+        ["CONTRAPTION"] = true,
+        ["SABLE"]       = true,
+        ["contraption"] = true,
+        ["sable"]       = true
     }
 }
 
+-- Operator State
 local STATE = {
-    lockedId = nil,
-    firePermitted = false,
-    singleShotQueued = false,
-    isAimed = false,
-    target = nil,
+    targetId = nil,           -- Selected physical target ID
+    target = nil,             -- Track info table
+    fireMode = "MANUAL",      -- "MANUAL" (requires keypress) or "AUTO" (fires when aimed)
+    firePermitted = false,    -- Safety toggle: true = safety OFF, false = safety ON
+    singleShot = false,       -- Queued shot on demand
+    isAimed = false,          -- Gun is on calculated lead position
     lastFireTime = 0
 }
 
-local function autoDetectPeripherals()
-    local radar, radarName = nil, nil
+-- ---- Multi-Peripheral & Gun Radar Detection ----
+local function findPeripherals()
+    local gunRadar, radarName = nil, nil
     local pitchCtrl, pitchName = nil, nil
     local yawCtrl, yawName = nil, nil
     local fireCtrl, fireName = nil, nil
@@ -41,34 +45,47 @@ local function autoDetectPeripherals()
         local pType = tostring(peripheral.getType(name) or ""):lower()
         local nLower = name:lower()
 
-        if not radar and p and p.getTracks then
-            radar = p
+        -- Gun Radar: any radar peripheral on network or local side
+        if not gunRadar and p and p.getTracks then
+            gunRadar = p
             radarName = name .. " (" .. pType .. ")"
         end
+
+        -- Auto Pitch Controller (elevation)
         if not pitchCtrl and p and p.setAngle and (pType:find("pitch") or nLower:find("pitch")) then
             pitchCtrl = p
             pitchName = name
         end
+
+        -- Auto Yaw Controller (rotation)
         if not yawCtrl and p and p.setAngle and (pType:find("yaw") or nLower:find("yaw")) then
             yawCtrl = p
             yawName = name
         end
+
+        -- Fire Controller (trigger)
         if not fireCtrl and p and (p.fireOn or p.keepFiring or pType:find("fire") or nLower:find("fire")) then
             fireCtrl = p
             fireName = name
         end
     end
 
-    return radar, radarName, pitchCtrl, pitchName, yawCtrl, yawName, fireCtrl, fireName
+    return gunRadar, radarName, pitchCtrl, pitchName, yawCtrl, yawName, fireCtrl, fireName
 end
 
-local radar, radarName, pitchCtrl, pitchName, yawCtrl, yawName, fireCtrl, fireName = autoDetectPeripherals()
+local radar, radarName, pitchCtrl, pitchName, yawCtrl, yawName, fireCtrl, fireName = findPeripherals()
 
 if not radar then
-    print("[ERROR] Radar not found on any side or wired network!")
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("========================================")
+    print(" [ERROR] Gun Radar not detected!")
+    print(" Connect radar directly or via Wired Modem.")
+    print("========================================")
     return
 end
 
+-- Math helpers
 local function vecSub(a, b)
     return {x = a.x - b.x, y = a.y - b.y, z = a.z - b.z}
 end
@@ -83,17 +100,29 @@ local function normalizeAngle(deg)
     return deg
 end
 
-local function isTargetValid(track)
+-- Filter check: MUST BE CONTRAPTION OR SABLE SHIP ONLY
+local function isPhysicalObject(track)
     if not track or not track.position then return false end
-    local eType = tostring(track.entityType or track.name or ""):lower()
-    for ignored, _ in pairs(CONFIG.ignoredTypes) do
-        if eType:find(ignored) then return false end
+    local cat = tostring(track.category or track.trackCategory or "")
+    
+    -- Check category whitelist
+    if not CONFIG.allowedCategories[cat] then
+        -- Also check entityType / name for contraption / ship
+        local eType = tostring(track.entityType or track.name or ""):lower()
+        if not (eType:find("contraption") or eType:find("sable") or eType:find("ship")) then
+            return false
+        end
     end
+
+    -- Ignore glue / corpses
+    local name = tostring(track.name or track.entityType or ""):lower()
+    if name:find("glue") or name:find("corpse") then return false end
+
     return true
 end
 
--- Full 6-pass CBC Ballistic Lead & Gravity Drop Calculation
-local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
+-- CBC Ballistic Calculation: 6-pass lead prediction + gravity drop
+local function calculateCBCLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     local predictedPos = {x = targetPos.x, y = targetPos.y, z = targetPos.z}
     local timeOfFlight = 0
 
@@ -107,6 +136,7 @@ local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
         predictedPos.z = targetPos.z + targetVel.z * timeOfFlight
     end
 
+    -- Gravity compensation: aim higher by 0.5 * g * t^2
     local dropCompensation = 0.5 * gravity * (timeOfFlight * timeOfFlight)
     local aimTarget = {
         x = predictedPos.x,
@@ -123,47 +153,59 @@ local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     return targetYaw, targetPitch, timeOfFlight, horizontalDist
 end
 
-local function drawHUD()
+-- Draw Terminal Status Display
+local function drawUI(gunPos, validCount)
     term.clear()
     term.setCursorPos(1, 1)
-    print("================ PVO AIR DEFENSE ================")
-    print("Radar: " .. tostring(radarName or "N/A"))
-    print("Guns:  Pitch=" .. tostring(pitchName and "OK" or "NO") ..
-          " | Yaw=" .. tostring(yawName and "OK" or "NO") ..
-          " | Fire=" .. tostring(fireName and "OK" or "NO"))
-    print("-------------------------------------------------")
-    
-    local safetyText = STATE.firePermitted and "[!] FIRE PERMITTED [!]" or "[SAFE] FIRE BLOCKED"
-    print("SAFETY STATUS: " .. safetyText)
-    print("LOCKED TARGET: " .. tostring(STATE.lockedId or "[NONE - STANDBY]"))
-    
+    print("========== PVO HEAVY AIR DEFENSE (OFFLINE) ==========")
+    print(string.format("Gun Pos: [%.0f, %.0f, %.0f] | Range: %.0fm", gunPos.x, gunPos.y, gunPos.z, CONFIG.maxRange))
+    print(string.format("Modules: Pitch=%s | Yaw=%s | Fire=%s",
+        pitchName and "OK" or "NO", yawName and "OK" or "NO", fireName and "OK" or "NO"))
+    print("Filter:  PHYSICAL CONTRAPTIONS & SABLE SHIPS ONLY")
+    print("-----------------------------------------------------")
+
+    local safetyStr = STATE.firePermitted and "[!] FIRE PERMITTED (ARMED) [!]" or "[SAFE] FIRE BLOCKED (SAFETY ON)"
+    print("SAFETY:  " .. safetyStr)
+    print("MODE:    " .. STATE.fireMode .. " | Targets in Sky: " .. validCount)
+    print("-----------------------------------------------------")
+
     if STATE.target then
         local t = STATE.target
-        print(string.format("Dist: %.0fm | Speed: %.1fb/s | ToF: %.2fs", t.dist, t.speed, t.tof))
-        print(string.format("Aim Angles -> Yaw: %.1f | Pitch: %.1f", t.yaw, t.pitch))
-        local aimStatus = STATE.isAimed and ">> ON TARGET (READY) <<" or ".. AIMING .."
-        print("Status: " .. aimStatus)
+        print("TARGET:  " .. tostring(t.name) .. " [" .. tostring(t.id) .. "]")
+        print(string.format("Pos:     X:%.0f Y:%.0f Z:%.0f", t.pos.x, t.pos.y, t.pos.z))
+        print(string.format("Flight:  Dist:%.0fm | Speed:%.1fb/s | ToF:%.2fs", t.dist, t.speed, t.tof))
+        print(string.format("Aim:     Yaw:%.1f deg | Pitch:%.1f deg", t.yaw, t.pitch))
+        local aimStr = STATE.isAimed and ">> AIMED ON TARGET (READY) <<" or ".. SLEWING TO LEAD POINT .."
+        print("Status:  " .. aimStr)
     else
-        print("Standby. Select a valid aircraft or contraption.")
+        print("TARGET:  [NO PHYSICAL TARGETS - STANDBY]")
+        print("Gun standing by in neutral azimuth.")
     end
-    print("-------------------------------------------------")
+
+    print("-----------------------------------------------------")
     print("CONTROLS:")
-    print(" [N] - Next Target    | [U] - Unlock (Standby)")
-    print(" [P] - Permit Toggle  | [F / Space] - FIRE 1 SHOT")
-    print(" [Q] - Quit Program")
-    print("=================================================")
+    print(" [P] - Permit / Safety Toggle   [A] - Toggle AUTO / MANUAL")
+    print(" [N] - Next Physical Target     [U] - Unlock Target")
+    print(" [F / Space] - FIRE ONE SHOT (Requires Permit)")
+    print(" [Q] - Stop Program")
+    print("=====================================================")
 end
 
+-- Keyboard input thread
 local function inputLoop()
     while true do
         local event, key = os.pullEvent("key")
         if key == keys.q then
-            print("\nPVO System stopped by operator.")
+            print("\nPVO Air Defense shut down by operator.")
+            if pitchCtrl and pitchCtrl.stopAuto then pitchCtrl.stopAuto() end
+            if yawCtrl and yawCtrl.stopAuto then yawCtrl.stopAuto() end
             return
         elseif key == keys.p then
             STATE.firePermitted = not STATE.firePermitted
+        elseif key == keys.a then
+            STATE.fireMode = (STATE.fireMode == "MANUAL") and "AUTO" or "MANUAL"
         elseif key == keys.u then
-            STATE.lockedId = nil
+            STATE.targetId = nil
             STATE.target = nil
             if pitchCtrl and pitchCtrl.stopAuto then pitchCtrl.stopAuto() end
             if yawCtrl and yawCtrl.stopAuto then yawCtrl.stopAuto() end
@@ -171,56 +213,88 @@ local function inputLoop()
             local tracks = radar.getTracks() or {}
             local candidates = {}
             for _, tr in ipairs(tracks) do
-                if isTargetValid(tr) then
+                if isPhysicalObject(tr) then
                     table.insert(candidates, tr)
                 end
             end
             if #candidates > 0 then
                 local nextIdx = 1
                 for i, c in ipairs(candidates) do
-                    if c.id == STATE.lockedId then
+                    if c.id == STATE.targetId then
                         nextIdx = (i % #candidates) + 1
                         break
                     end
                 end
-                STATE.lockedId = candidates[nextIdx].id
+                STATE.targetId = candidates[nextIdx].id
             else
-                STATE.lockedId = nil
+                STATE.targetId = nil
             end
         elseif key == keys.f or key == keys.space then
             if STATE.firePermitted then
-                STATE.singleShotQueued = true
+                STATE.singleShot = true
             else
-                print("\n[BLOCKED] Fire not permitted! Press [P] to arm safety.")
-                sleep(0.5)
+                -- Visual warning
+                STATE.singleShot = false
             end
         end
     end
 end
 
+-- Fire Control and Ballistic Lead Thread
 local function trackingLoop()
     while true do
-        local myPos = (radar.getPosition and radar.getPosition()) or {x = 0, y = 0, z = 0}
+        local gunPos = (radar.getPosition and radar.getPosition()) or {x = 0, y = 70, z = 0}
         local tracks = radar.getTracks() or {}
-        local found = nil
+        local validTargets = {}
+        local currentTarget = nil
 
-        if STATE.lockedId then
-            for _, tr in ipairs(tracks) do
-                if tr.id == STATE.lockedId and isTargetValid(tr) then
-                    found = tr
+        -- 1. Scan and filter ONLY physical contraptions & Sable ships
+        for _, tr in ipairs(tracks) do
+            if isPhysicalObject(tr) then
+                local p = tr.position
+                local d = vecLength(vecSub(p, gunPos))
+                if d >= CONFIG.minRange and d <= CONFIG.maxRange then
+                    table.insert(validTargets, tr)
+                end
+            end
+        end
+
+        -- 2. Target acquisition: lock selected ID or auto-acquire nearest physical object
+        if STATE.targetId then
+            for _, tr in ipairs(validTargets) do
+                if tr.id == STATE.targetId then
+                    currentTarget = tr
                     break
                 end
             end
         end
 
-        if found then
-            local pos = found.position
-            local vel = found.velocity or {x = 0, y = 0, z = 0}
+        if not currentTarget and #validTargets > 0 then
+            -- Auto-select nearest physical object
+            local bestDist = CONFIG.maxRange + 1
+            for _, tr in ipairs(validTargets) do
+                local d = vecLength(vecSub(tr.position, gunPos))
+                if d < bestDist then
+                    bestDist = d
+                    currentTarget = tr
+                    STATE.targetId = tr.id
+                end
+            end
+        elseif not currentTarget then
+            STATE.targetId = nil
+        end
+
+        -- 3. Ballistic Tracking & Lead Calculation
+        if currentTarget then
+            local pos = currentTarget.position
+            local vel = currentTarget.velocity or {x = 0, y = 0, z = 0}
             local vSpeed = vecLength(vel)
-            local yaw, pitch, tof, dist = calculateLead(myPos, pos, vel, CONFIG.muzzleVelocity, CONFIG.gravity)
+            local yaw, pitch, tof, dist = calculateCBCLead(gunPos, pos, vel, CONFIG.muzzleVelocity, CONFIG.gravity)
 
             STATE.target = {
-                id = found.id,
+                id = currentTarget.id,
+                name = tostring(currentTarget.name or currentTarget.entityType or currentTarget.category or "Physical Contraption"),
+                pos = pos,
                 dist = dist,
                 speed = vSpeed,
                 tof = tof,
@@ -228,6 +302,7 @@ local function trackingLoop()
                 pitch = pitch
             }
 
+            -- Direct gun motors
             if yawCtrl and yawCtrl.setAngle then yawCtrl.setAngle(yaw) end
             if pitchCtrl and pitchCtrl.setAngle then pitchCtrl.setAngle(pitch) end
 
@@ -239,8 +314,22 @@ local function trackingLoop()
 
             STATE.isAimed = (yawDiff <= CONFIG.aimTolerance) and (pitchDiff <= CONFIG.aimTolerance)
 
+            -- 4. Firing Logic: ONLY BY PERMISSION
             local now = os.epoch("utc") / 1000
-            if STATE.singleShotQueued and STATE.firePermitted and (now - STATE.lastFireTime >= CONFIG.fireDelay) then
+            local shouldFire = false
+
+            if STATE.firePermitted and (now - STATE.lastFireTime >= CONFIG.fireDelay) then
+                if STATE.singleShot then
+                    shouldFire = true
+                    STATE.singleShot = false
+                elseif STATE.fireMode == "AUTO" and STATE.isAimed then
+                    shouldFire = true
+                end
+            else
+                STATE.singleShot = false
+            end
+
+            if shouldFire then
                 if fireCtrl and fireCtrl.fireOn then
                     fireCtrl.fireOn()
                     sleep(0.1)
@@ -251,16 +340,15 @@ local function trackingLoop()
                     redstone.setOutput("back", false)
                 end
                 STATE.lastFireTime = now
-                STATE.singleShotQueued = false
             end
         else
             STATE.target = nil
             STATE.isAimed = false
-            STATE.singleShotQueued = false
+            STATE.singleShot = false
         end
 
-        drawHUD()
-        sleep(0.1)
+        drawUI(gunPos, #validTargets)
+        sleep(0.05) -- 20 Hz update
     end
 end
 
