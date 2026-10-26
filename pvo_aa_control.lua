@@ -1,20 +1,18 @@
--- ===================================================================
--- Minecraft Create: Big Cannons + Create Radar + CC: Tweaked
--- Автоматическая система наведения крупнокалиберного ПВО орудия
--- ===================================================================
+-- ==========================================================
+-- Heavy Anti-Air AA System (Create Big Cannons + Radar)
+-- Auto lead calculation & proximity detonation support
+-- ==========================================================
 
--- --- Настройки баллистики ---
 local CONFIG = {
-    muzzleVelocity = 60.0,    -- Начальная скорость снаряда (блоков/сек)
-    gravity = 1.0,            -- Гравитационная поправка CBC снаряда
-    minRange = 20.0,          -- Минимальная дистанция огня (блоков)
-    maxRange = 500.0,         -- Максимальная дистанция обнаружения/огня (блоков)
-    aimTolerance = 1.8,       -- Допустимая погрешность наведения в градусах
-    fireDelay = 0.5,          -- Задержка между выстрелами (сек)
-    iterations = 5,           -- Количество итераций упреждения для точного расчета
+    muzzleVelocity = 60.0,    -- Projectile speed (blocks/sec)
+    gravity = 1.0,            -- Ballistic gravity drop compensation
+    minRange = 20.0,          -- Min range deadzone (blocks)
+    maxRange = 500.0,         -- Max detection & engagement range (blocks)
+    aimTolerance = 1.8,       -- Aim tolerance in degrees before firing
+    fireDelay = 0.5,          -- Delay between shots (seconds)
+    iterations = 5,           -- Lead calculation iterations
 }
 
--- Умный автоматический поиск периферии в ЛЮБОМ месте (с любой стороны или по кабелю модема)
 local function autoDetectPeripherals()
     local radar, radarName = nil, nil
     local pitchCtrl, pitchName = nil, nil
@@ -28,25 +26,25 @@ local function autoDetectPeripherals()
         local pType = tostring(peripheral.getType(name) or ""):lower()
         local nLower = name:lower()
 
-        -- 1. Радар: любой блок с функцией getTracks (независимо от положения и названия)
+        -- 1. Radar (any device with getTracks)
         if not radar and p and p.getTracks then
             radar = p
             radarName = name .. " (" .. pType .. ")"
         end
 
-        -- 2. Контроллер вертикали (Pitch)
+        -- 2. Pitch controller (elevation)
         if not pitchCtrl and p and p.setAngle and (pType:find("pitch") or nLower:find("pitch")) then
             pitchCtrl = p
             pitchName = name
         end
 
-        -- 3. Контроллер горизонтали (Yaw)
+        -- 3. Yaw controller (azimuth rotation)
         if not yawCtrl and p and p.setAngle and (pType:find("yaw") or nLower:find("yaw")) then
             yawCtrl = p
             yawName = name
         end
 
-        -- 4. Контроллер огня (Fire)
+        -- 4. Fire controller (trigger)
         if not fireCtrl and p and (p.fireOn or p.keepFiring or pType:find("fire") or nLower:find("fire")) then
             fireCtrl = p
             fireName = name
@@ -60,27 +58,25 @@ local radar, radarName, pitchCtrl, pitchName, yawCtrl, yawName, fireCtrl, fireNa
 
 term.clear()
 term.setCursorPos(1, 1)
-print("=== СИСТЕМА УПРАВЛЕНИЯ ПВО (CBC + RADAR) ===")
-print("Радар:       " .. tostring(radarName or "[НЕ НАЙДЕН]"))
-print("Pitch (Верт):" .. tostring(pitchName or "[НЕ НАЙДЕН]"))
-print("Yaw (Гориз): " .. tostring(yawName or "[НЕ НАЙДЕН]"))
-print("Спуск (Огонь):" .. tostring(fireName or "[НЕ НАЙДЕН]"))
-print("============================================")
+print("=== PVO AA AIR DEFENSE CONTROL ===")
+print("Radar: " .. tostring(radarName or "[NOT FOUND]"))
+print("Pitch: " .. tostring(pitchName or "[NOT FOUND]"))
+print("Yaw:   " .. tostring(yawName or "[NOT FOUND]"))
+print("Fire:  " .. tostring(fireName or "[NOT FOUND]"))
+print("==================================")
 
 if not radar then
-    print("[!] Радар не обнаружен!")
-    print("Радар можно ставить с ЛЮБОЙ стороны или")
-    print("подключить проводом через Wired Modem (ПКМ).")
+    print("[ERROR] Radar not detected!")
+    print("Place radar adjacent or connect via Wired Modem.")
     return
 end
 
 if not (pitchCtrl and yawCtrl) then
-    print("[!] Контроллеры Pitch/Yaw не найдены.")
-    print("Подключите Auto Pitch и Auto Yaw Controller.")
+    print("[WARN] Pitch/Yaw controller not found.")
+    print("Mount Auto Pitch and Auto Yaw controllers.")
     return
 end
 
--- Вспомогательные векторные операции
 local function vecSub(a, b)
     return {x = a.x - b.x, y = a.y - b.y, z = a.z - b.z}
 end
@@ -95,7 +91,6 @@ local function normalizeAngle(deg)
     return deg
 end
 
--- Расчет баллистического упреждения (Lead & Drop)
 local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     local predictedPos = {x = targetPos.x, y = targetPos.y, z = targetPos.z}
     local timeOfFlight = 0
@@ -126,10 +121,9 @@ local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     return targetYaw, targetPitch, timeOfFlight, aimTarget
 end
 
--- Основной цикл сопровождения и ведения огня
 local function mainLoop()
     local lastFireTime = 0
-    print("[СТАТУС] ПВО в боевом дежурстве...")
+    print("[STATUS] Air Defense active. Scanning sky...")
 
     while true do
         local myPos = (radar.getPosition and radar.getPosition()) or {x = 0, y = 0, z = 0}
@@ -176,7 +170,7 @@ local function mainLoop()
             local now = os.epoch("utc") / 1000
 
             if isAimed and fireCtrl and (now - lastFireTime >= CONFIG.fireDelay) then
-                print(string.format("[ЗАЛП] Цель: %s | Дист: %.0fm | Yaw: %.1f | Pitch: %.1f",
+                print(string.format("[FIRE] Target: %s | Dist: %.0fm | Y: %.1f | P: %.1f",
                     tostring(bestTarget.id), closestDist, yaw, pitch))
                 fireCtrl.fireOn()
                 sleep(0.1)

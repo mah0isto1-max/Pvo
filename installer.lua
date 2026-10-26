@@ -1,28 +1,23 @@
--- ==========================================================
--- Автоматический загрузчик и обновлятор ПВО с GitHub
--- Репозиторий: https://github.com/mah0isto1-max/Pvo
--- ==========================================================
-
 local BASE_URL = "https://raw.githubusercontent.com/mah0isto1-max/Pvo/main/"
 
 local files = {
-    ["pvo_aa_control.lua"] = "startup.lua",      -- Сохраняем как startup.lua для автозапуска при включении
-    ["inspect_left.lua"]   = "inspect.lua"       -- Утилита проверки периферии
+    ["pvo_aa_control.lua"] = "startup.lua",
+    ["inspect_left.lua"]   = "inspect.lua"
 }
 
 print("========================================")
-print("  Загрузка системы ПВО с GitHub...")
+print("  Downloading AA System from GitHub...")
 print("========================================")
 
 if not http then
-    print("[ОШИБКА] В конфигурации сервера/мода отключен HTTP API!")
-    print("Включите http_enable = true в computercraft-server.toml")
+    print("[ERROR] HTTP API is disabled on server!")
+    print("Enable http_enable = true in config.")
     return
 end
 
 for remoteFile, localFile in pairs(files) do
     local url = BASE_URL .. remoteFile
-    write("Скачивание " .. remoteFile .. " -> " .. localFile .. "... ")
+    write("Downloading " .. remoteFile .. " -> " .. localFile .. "... ")
     
     local response = http.get(url)
     if response then
@@ -34,12 +29,13 @@ for remoteFile, localFile in pairs(files) do
         f.close()
         print("[OK]")
     else
-        print("[ОШИБКА]")
+        print("[FAIL]")
     end
 end
 
 print("========================================")
-print("Установка завершена успешно!")
-print("Главный скрипт сохранен как: startup.lua")
-print("Для немедленного запуска введите: startup")
+print("Installation completed successfully!")
+print("Main script saved as: startup.lua")
+print("Run 'startup' to start the AA system.")
+print("Run 'inspect' to scan connected blocks.")
 print("========================================")
