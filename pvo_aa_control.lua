@@ -1,19 +1,18 @@
 -- ===================================================================
 -- Minecraft Create: Big Cannons + Create Radar + CC: Tweaked
 -- Heavy Anti-Air (PVO) Fire Control System
--- MANUAL AUTHORIZATION & STRICT TARGET FILTERING
+-- REFINED CBC BALLISTICS (GRAVITY DROP & SPEED COMPENSATION)
 -- ===================================================================
 
 local CONFIG = {
-    muzzleVelocity = 60.0,    -- Initial shell velocity (blocks/sec)
-    gravity = 1.0,            -- Gravity drop compensation
+    muzzleVelocity = 70.0,    -- CBC projectile speed (blocks/sec), ~3.5 blocks/tick for 3-4 charges
+    gravity = 1.25,           -- CBC ballistic gravity drop compensation
     minRange = 20.0,          -- Minimum engagement range (blocks)
     maxRange = 500.0,         -- Maximum radar engagement range (blocks)
     aimTolerance = 1.8,       -- Aim tolerance in degrees before firing
     fireDelay = 0.5,          -- Minimum time between shots (sec)
-    iterations = 5,           -- Lead calculation iterations
+    iterations = 6,           -- Lead calculation iterations
     
-    -- Filter out trash entities (mobs, animals, items, glue)
     ignoredTypes = {
         ["bat"] = true, ["cow"] = true, ["pig"] = true, ["sheep"] = true,
         ["chicken"] = true, ["zombie"] = true, ["skeleton"] = true,
@@ -22,13 +21,12 @@ local CONFIG = {
     }
 }
 
--- Safety State: FIRE IS FORBIDDEN BY DEFAULT
 local STATE = {
-    lockedId = nil,           -- Currently locked target ID (nil = idle/standby)
-    firePermitted = false,    -- Safety toggle: user MUST permit fire
-    singleShotQueued = false, -- User pressed [F] or [SPACE] for 1 shot
-    isAimed = false,          -- Gun is on calculated lead point
-    target = nil,             -- Target data table
+    lockedId = nil,
+    firePermitted = false,
+    singleShotQueued = false,
+    isAimed = false,
+    target = nil,
     lastFireTime = 0
 }
 
@@ -94,6 +92,7 @@ local function isTargetValid(track)
     return true
 end
 
+-- Full 6-pass CBC Ballistic Lead & Gravity Drop Calculation
 local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     local predictedPos = {x = targetPos.x, y = targetPos.y, z = targetPos.z}
     local timeOfFlight = 0
@@ -124,7 +123,6 @@ local function calculateLead(gunPos, targetPos, targetVel, muzzleVel, gravity)
     return targetYaw, targetPitch, timeOfFlight, horizontalDist
 end
 
--- Render HUD Interface
 local function drawHUD()
     term.clear()
     term.setCursorPos(1, 1)
@@ -156,7 +154,6 @@ local function drawHUD()
     print("=================================================")
 end
 
--- Key handling loop
 local function inputLoop()
     while true do
         local event, key = os.pullEvent("key")
@@ -171,7 +168,6 @@ local function inputLoop()
             if pitchCtrl and pitchCtrl.stopAuto then pitchCtrl.stopAuto() end
             if yawCtrl and yawCtrl.stopAuto then yawCtrl.stopAuto() end
         elseif key == keys.n then
-            -- Cycle to next valid target
             local tracks = radar.getTracks() or {}
             local candidates = {}
             for _, tr in ipairs(tracks) do
@@ -202,7 +198,6 @@ local function inputLoop()
     end
 end
 
--- Tracking & Fire Loop
 local function trackingLoop()
     while true do
         local myPos = (radar.getPosition and radar.getPosition()) or {x = 0, y = 0, z = 0}
@@ -245,14 +240,12 @@ local function trackingLoop()
             STATE.isAimed = (yawDiff <= CONFIG.aimTolerance) and (pitchDiff <= CONFIG.aimTolerance)
 
             local now = os.epoch("utc") / 1000
-            -- Execute shot ONLY IF OPERATOR QUEUED IT AND SAFETY IS ARMED
             if STATE.singleShotQueued and STATE.firePermitted and (now - STATE.lastFireTime >= CONFIG.fireDelay) then
                 if fireCtrl and fireCtrl.fireOn then
                     fireCtrl.fireOn()
                     sleep(0.1)
                     fireCtrl.fireOff()
                 else
-                    -- Fallback: pulse redstone on back/bottom
                     redstone.setOutput("back", true)
                     sleep(0.1)
                     redstone.setOutput("back", false)
